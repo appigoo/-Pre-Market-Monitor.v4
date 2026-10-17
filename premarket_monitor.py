@@ -1,6 +1,7 @@
 """
 盤前監控 Pre-Market Monitor
 美股盤前數據監控 | Fortune Trading Desk
+v6: 多股票同時查詢 — 重點股票清單(最多6檔) · 每檔獨立技術面/RS/P-C/新聞/財報日 · 網址 ?t= 記憶清單
 v5: 全面升級 — st_autorefresh · 價位警報 · VIX歷史對比 · 深色模式
      · 恐懼貪婪指數 · 新聞手動刷新 · 週曆排序 · Prompt複製反饋
      · 殖利率 · 板塊輪動 · Fed/財報/中美intel · TSLA技術位
@@ -17,6 +18,8 @@ import requests
 import json
 import os
 import html as _html
+import re
+import copy
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -58,13 +61,17 @@ DEFAULTS = {
     "tg_vix_threshold":      25.0,
     "tg_tsla_pct_threshold": 3.0,
     "tg_yield_threshold":    4.5,
-    # TSLA tech panel
-    "tsla_shares":           100,
+    # focus tickers (multi-stock)
+    "focus_tickers":         ["TSLA"],
+    "focus_names":           {},
+    "focus_bench":           {},
+    "focus_shares":          {},
+    "focus_loaded":          False,
     "tech_period":           "3mo",
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
-        st.session_state[k] = v
+        st.session_state[k] = copy.deepcopy(v)
 
 
 # ── Theme helpers ─────────────────────────────────────────────────────────────
@@ -266,7 +273,7 @@ def inject_css():
         margin-bottom:.7rem;padding-bottom:.38rem;border-bottom:1px solid var(--border);}}
     .rs-title{{font-family:var(--mono);font-size:.72rem;font-weight:600;
         letter-spacing:.08em;color:var(--accent);text-transform:uppercase;}}
-    .rs-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:.55rem;}}
+    .rs-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:.5rem;margin-bottom:.55rem;}}
     .rs-card{{background:var(--bg);border:1px solid var(--border);border-radius:5px;
         padding:.6rem .75rem;text-align:center;}}
     .rs-card.outperform{{border-color:var(--up);background:var(--up-bg);}}
@@ -290,7 +297,7 @@ def inject_css():
         margin-bottom:.65rem;padding-bottom:.38rem;border-bottom:1px solid var(--border);}}
     .pc-title{{font-family:var(--mono);font-size:.72rem;font-weight:600;
         letter-spacing:.08em;color:var(--accent);text-transform:uppercase;}}
-    .pc-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin-bottom:.5rem;}}
+    .pc-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:.5rem;margin-bottom:.5rem;}}
     .pc-card{{background:var(--bg);border:1px solid var(--border);border-radius:5px;
         padding:.65rem .85rem;text-align:center;}}
     .pc-card.extreme-fear{{border-color:var(--up);background:var(--up-bg);}}
@@ -936,7 +943,7 @@ def get_economic_calendar(year: int, month: int) -> list[dict]:
             et_time = "08:30",
             color   = "red",
             impact  = "high",
-            note    = f"BLS官方發布{adj_note}。非農+失業率+薪資增長三合一，Fed最重視的就業數據，直接影響下次FOMC。偏強→加息預期升→科技/TSLA承壓；偏弱→降息預期→科技升。",
+            note    = f"BLS官方發布{adj_note}。非農+失業率+薪資增長三合一，Fed最重視的就業數據，直接影響下次FOMC。偏強→加息預期升→科技/成長股承壓；偏弱→降息預期→科技升。",
             official= "BLS",
         ))
 
@@ -954,7 +961,7 @@ def get_economic_calendar(year: int, month: int) -> list[dict]:
             et_time = "08:30",
             color   = "red",
             impact  = "high",
-            note    = "通脹最關鍵指標。YoY高於預期→債息升/科技跌；低於預期→降息預期→科技/TSLA升。",
+            note    = "通脹最關鍵指標。YoY高於預期→債息升/科技跌；低於預期→降息預期→科技/成長股升。",
             official= "BLS",
         ))
 
@@ -974,7 +981,7 @@ def get_economic_calendar(year: int, month: int) -> list[dict]:
         ))
 
     # ── TSLA Deliveries ── first business day of Jan/Apr/Jul/Oct
-    if month in (1, 4, 7, 10):
+    if month in (1, 4, 7, 10) and "TSLA" in st.session_state.get("focus_tickers", ["TSLA"]):
         first_bd = _date(year, month, 1)
         while first_bd.weekday() >= 5 or _is_us_holiday(first_bd):
             first_bd += _td(days=1)
@@ -1006,7 +1013,7 @@ def get_economic_calendar(year: int, month: int) -> list[dict]:
         et_time = "10:00",
         color   = "red",
         impact  = "high",
-        note    = "製造業景氣最關鍵先行指標。>50=擴張/<50=收縮。新訂單+就業子指數影響Fed判斷。高於預期→美元升/債息升；低於預期→降息預期升→科技/TSLA利好。",
+        note    = "製造業景氣最關鍵先行指標。>50=擴張/<50=收縮。新訂單+就業子指數影響Fed判斷。高於預期→美元升/債息升；低於預期→降息預期升→科技/成長股利好。",
         official= "ISM",
     ))
     # S&P Global Manufacturing PMI Final (09:45 ET) — same day as ISM
@@ -1026,7 +1033,7 @@ def get_economic_calendar(year: int, month: int) -> list[dict]:
         et_time = "10:00",
         color   = "blue",
         impact  = "low",
-        note    = "月度營建支出數據，影響工業/地產板塊；對科技/TSLA直接影響有限。",
+        note    = "月度營建支出數據，影響工業/地產板塊；對科技/成長股直接影響有限。",
         official= "Census Bureau",
     ))
 
@@ -1394,6 +1401,7 @@ def fetch_weekly_events(serper_key: str, groq_key: str) -> list:
         st.session_state.weekly_events_fetched = today_key
         return fb
     dates = [(mon + timedelta(days=i)).isoformat() for i in range(5)]
+    _focus = ", ".join(st.session_state.get("focus_tickers", ["TSLA"]))
     wdays = [_WEEKDAY_MAP[i] for i in range(5)]
     prompt = f"""你是美股宏觀分析師。根據以下本週新聞，為交易員生成一個五天事件日曆。
 
@@ -1434,8 +1442,8 @@ def fetch_weekly_events(serper_key: str, groq_key: str) -> list:
   * 無法確認時間的事件填空字串
 - color: red=重大風險/央行/地緣, amber=中等/貿易/數據, blue=例行數據, purple=聯儲官員, green=利好
 - impact: high=市場必看, med=中等影響, low=參考
-- note 要具體，點出對科技股/TSLA 的影響方向
-- **特別注意**：若本週或下週初有TSLA Q2交付數據（通常7月第一個工作日）、TSLA財報（通常7月第三週）、FOMC會議，必須列入並標注準確時間"""
+- note 要具體，點出對科技股與重點股票({_focus})的影響方向
+- **特別注意**：若本週或下週初有重點股票（{_focus}）的財報/交付數據、FOMC會議，必須列入並標注準確時間"""
     try:
         raw = groq_chat(prompt, groq_key, max_tokens=1600, temperature=0.2)
         raw = raw.replace("```json","").replace("```","").strip()
@@ -1484,40 +1492,7 @@ def render_weekly_calendar(events: list, source_label: str):
                             unsafe_allow_html=True)
             break
 
-    # ── TSLA Upcoming Key Events reminder (hardcoded awareness) ──
-    et_now   = datetime.now(pytz.timezone("America/New_York"))
-    et_today = et_now.date()
-    reminders = []
-    # Q2 delivery: first business day of July
-    import calendar as _cal
-    _jul1 = et_today.replace(month=7, day=1)
-    # Find first Mon-Fri of July
-    _q2_delivery = _jul1
-    while _q2_delivery.weekday() >= 5:   # skip Sat/Sun
-        _q2_delivery += timedelta(days=1)
-    days_to_delivery = (_q2_delivery - et_today).days
-    if 0 <= days_to_delivery <= 7:
-        _d_str = _q2_delivery.strftime("%-m月%-d日")
-        _urgency = "🚨 今日" if days_to_delivery == 0 else f"📅 {days_to_delivery}日後"
-        reminders.append(
-            f"{_urgency} TSLA Q2交付數據預計 <b>{_d_str} ~06:00 ET</b> 發布 — "
-            f"高於預期→缺口上升，低於預期→缺口下跌，Binary Event！"
-        )
-    # Q2 earnings: typically 3rd Tuesday/Wednesday of July
-    _q2_earn_approx = et_today.replace(month=7, day=22)
-    days_to_earn = (_q2_earn_approx - et_today).days
-    if 0 <= days_to_earn <= 14:
-        reminders.append(
-            f"📅 {days_to_earn}日後 TSLA Q2財報預計 <b>7月22日前後 盤後</b> — "
-            f"提前留意IV急升，考慮earnings play策略"
-        )
-    if reminders:
-        for r in reminders:
-            st.markdown(
-                f'<div style="background:#EAF4EE;border-left:3px solid #3A7D5C;'
-                f'border-radius:0 4px 4px 0;padding:.45rem .85rem;font-family:var(--sans,sans-serif);'
-                f'font-size:.76rem;color:#1E4D35;margin-bottom:.3rem">🚗 {r}</div>',
-                unsafe_allow_html=True)
+    _render_focus_reminders()
     st.markdown('<div class="section-label">▸ 📅 本週重磅事件日曆 · 宏觀催化劑追蹤</div>', unsafe_allow_html=True)
     imp_map  = {"high":"imp-high","med":"imp-med","low":"imp-low"}
     imp_text = {"high":"高影響","med":"中影響","low":"低影響"}
@@ -1652,7 +1627,7 @@ def _yield_signal(y10, y2_or_3m, y30) -> tuple[str, str, str]:
     if y10 >= 5.0:
         return "⚠️ 10年息 ≥5.0% — 股市估值嚴重受壓，成長股高風險", "#FDECEA", "#C0392B"
     if y10 >= 4.5:
-        return "🔶 10年息 ≥4.5% — 科技股/TSLA承壓，留意Fed路徑", "#FFF8E8", "#D4A017"
+        return "🔶 10年息 ≥4.5% — 科技/成長股承壓，留意Fed路徑", "#FFF8E8", "#D4A017"
     if y10 <= 3.5:
         return "✅ 10年息 ≤3.5% — 估值壓力低，利好成長股", "#EAF4EE", "#3A7D5C"
     # Inversion signal
@@ -1801,9 +1776,9 @@ def _rotation_insight(sectors: list) -> str:
     # TSLA-specific
     if tech:
         if tech["pct"] > 0.5:
-            parts.append(f"XLK 科技 {fmt_pct(tech['pct'])} 利好 TSLA")
+            parts.append(f"XLK 科技 {fmt_pct(tech['pct'])} 利好科技成長股")
         elif tech["pct"] < -0.5:
-            parts.append(f"XLK 科技 {fmt_pct(tech['pct'])} 壓制 TSLA")
+            parts.append(f"XLK 科技 {fmt_pct(tech['pct'])} 壓制科技成長股")
 
     # Laggard warning
     if laggard["pct"] is not None and laggard["pct"] < -1.5:
@@ -1948,7 +1923,7 @@ def render_oil_panel():
     p, pct = wti.get("price"), wti.get("pct")
     if p and pct is not None:
         if   pct >  2:   msg,bg,bc,tc = f"⚠️ WTI 急升 <b>{fmt_pct(pct)}</b>，科技股承壓，注意通脹預期上移","#FDECEA","#C0392B","#7B1A12"
-        elif pct >  0.5: msg,bg,bc,tc = f"🔶 WTI 上漲 <b>{fmt_pct(pct)}</b>，留意 TSLA/科技股壓力","#FFF8E8","#D4A017","#6B5000"
+        elif pct >  0.5: msg,bg,bc,tc = f"🔶 WTI 上漲 <b>{fmt_pct(pct)}</b>，留意科技/成長股壓力","#FFF8E8","#D4A017","#6B5000"
         elif pct < -2:   msg,bg,bc,tc = f"✅ WTI 急跌 <b>{fmt_pct(pct)}</b>，通脹壓力減輕，利好科技/成長股","#EAF4EE","#3A7D5C","#1E4D35"
         elif pct < -0.5: msg,bg,bc,tc = f"🔽 WTI 下跌 <b>{fmt_pct(pct)}</b>，能源成本回落，科技股溫和利好","#EAF4EE","#3A7D5C","#1E4D35"
         else:            msg,bg,bc,tc = f"WTI 平穩 <b>{fmt_pct(pct)}</b>，能源因素對市場影響中性","#F0EDE8","#D8D0C0","#8A8278"
@@ -1982,13 +1957,13 @@ def _macd(series: pd.Series):
     return macd_line, signal, macd_line - signal
 
 @st.cache_data(ttl=120, show_spinner=False)
-def fetch_tsla_technicals(period: str = "3mo") -> dict:
+def fetch_technicals(ticker: str, period: str = "3mo") -> dict:
     """
     Fetch TSLA OHLCV + compute EMA20/50/200, ATR14, RSI14, MACD, key levels.
-    Returns dict with all values needed for render_tsla_tech_panel().
+    Returns dict with all values needed for render_tech_panel().
     """
     try:
-        df = yf.download("TSLA", period=period, interval="1d",
+        df = yf.download(ticker, period=period, interval="1d",
                          progress=False, auto_adjust=True)
         if df.empty: raise ValueError("Empty dataframe")
         if isinstance(df.columns, pd.MultiIndex):
@@ -2128,15 +2103,15 @@ def _tech_signal_summary(t: dict, shares: int) -> list[str]:
     return lines
 
 
-def render_tsla_tech_panel():
-    st.markdown('<div class="section-label">▸ 📐 TSLA 技術分析 · 關鍵位與交易設定</div>',
+def render_tech_panel(ticker: str):
+    st.markdown(f'<div class="section-label">▸ 📐 {ticker} 技術分析 · 關鍵位與交易設定</div>',
                 unsafe_allow_html=True)
     period = st.session_state.get("tech_period", "3mo")
-    t = fetch_tsla_technicals(period)
+    t = fetch_technicals(ticker, period)
 
     if t.get("error"):
-        st.error(f"技術數據載入失敗：{t['error']}")
-        return
+        st.error(f"{ticker} 技術數據載入失敗：{t['error']}")
+        return None
 
     price = t["price"]
     gap_pct = t["gap_pct"]
@@ -2152,7 +2127,7 @@ def render_tsla_tech_panel():
         '<div class="tech-wrap">'
         '<div class="tech-header">'
         '<div>'
-        '<div class="tech-title">📐 TSLA · 技術關鍵位</div>'
+        f'<div class="tech-title">📐 {ticker} · 技術關鍵位</div>'
         f'<div style="font-family:var(--mono,monospace);font-size:.6rem;color:var(--muted)">{now_lbl} · {period}</div>'
         '</div>'
         f'<div class="tech-price {cc(price - t["prev"])}">'
@@ -2223,7 +2198,7 @@ def render_tsla_tech_panel():
     levels_html += '</div>'
 
     # ── Signal summary ──
-    shares = st.session_state.get("tsla_shares", 100)
+    shares = get_shares(ticker)
     signals = _tech_signal_summary(t, shares)
     sig_html = '<div class="signal-row">' + "<br>".join(signals) + '</div>'
 
@@ -2418,7 +2393,7 @@ def _macro_risk_signal(dxy: dict, btc: dict, gold: dict) -> tuple[str, str, str]
     if dxy_pct is not None:
         if dxy_pct >= 0.5:
             score -= 2
-            signals.append(f"DXY {dxy_pct:+.2f}% ↑ 美元走強，科技/TSLA承壓")
+            signals.append(f"DXY {dxy_pct:+.2f}% ↑ 美元走強，科技/成長股承壓")
         elif dxy_pct <= -0.5:
             score += 2
             signals.append(f"DXY {dxy_pct:+.2f}% ↓ 美元走弱，利好成長股")
@@ -2447,7 +2422,7 @@ def _macro_risk_signal(dxy: dict, btc: dict, gold: dict) -> tuple[str, str, str]
 
     # ── Final verdict ──
     if score >= 3:
-        verdict = "🚀 <b>強Risk-On</b> — 多項先行指標同步看多，TSLA做多信號增強"
+        verdict = "🚀 <b>強Risk-On</b> — 多項先行指標同步看多，成長股做多信號增強"
         bg, bc = "var(--up-bg)", "var(--up)"
     elif score >= 1:
         verdict = "✅ <b>溫和Risk-On</b> — 先行指標偏多，配合技術面做多"
@@ -2605,24 +2580,15 @@ def render_macro_lead_panel():
 
 
 
-# ── #3 TSLA vs QQQ Relative Strength ─────────────────────────────────────────
-RS_PAIRS = [
-    # (ticker, label_zh, benchmark)
-    ("TSLA", "TSLA", "QQQ"),
-    ("NVDA", "NVDA", "QQQ"),
-    ("AAPL", "AAPL", "QQQ"),
-    ("MSFT", "MSFT", "QQQ"),
-]
-
+# ── #3 個股相對強弱 vs 基準（多股票）─────────────────────────────────────────
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_relative_strength() -> dict:
+def fetch_relative_strength(bench_items: tuple) -> dict:
     """
-    Fetch session pct for TSLA, NVDA, AAPL, MSFT vs QQQ benchmark.
-    Returns dict keyed by ticker with pct, qqq_pct, rs (difference), 5d/20d avg RS.
+    bench_items: ((ticker, benchmark), ...)  — tuple 以便 cache。
+    回傳 {ticker: {label, bench, pct, bench_pct, rs, rs_5d, rs_20d, price}}
     """
     et_t   = datetime.now(pytz.timezone("America/New_York")).time()
-    is_pre = time(4,0) <= et_t < time(9,30)
-    is_reg = time(9,30) <= et_t < time(16,0)
+    is_pre = time(4, 0) <= et_t < time(9, 30)
 
     def _pct(d: dict) -> float | None:
         if not d or d.get("error"): return None
@@ -2631,131 +2597,119 @@ def fetch_relative_strength() -> dict:
         if d.get("pre_pct") is not None:              return d["pre_pct"]
         return None
 
-    # Fetch quotes
-    qqq_d   = fetch_quote("QQQ")
-    qqq_pct = _pct(qqq_d)
+    all_t = sorted({t for t, _ in bench_items} | {b for _, b in bench_items})
+    quote_map = {t: fetch_quote(t) for t in all_t}
 
-    results = {}
-    tickers = list({t for t,_,_ in RS_PAIRS} | {"QQQ"})
-    quote_map = {"QQQ": qqq_d}
-    for t,_,_ in RS_PAIRS:
-        if t not in quote_map:
-            quote_map[t] = fetch_quote(t)
-
-    # 20-day historical RS for context (uses daily close)
+    # 30 日歷史 RS（日報酬差）
     hist_rs = {}
     try:
-        all_t = [t for t,_,_ in RS_PAIRS] + ["QQQ"]
         df_hist = yf.download(all_t, period="30d", interval="1d",
                               progress=False, auto_adjust=True)
         if isinstance(df_hist.columns, pd.MultiIndex):
             close = df_hist["Close"].dropna(how="all")
         else:
             close = df_hist[["Close"]].rename(columns={"Close": all_t[0]})
-        # pct returns
         ret = close.pct_change() * 100
-        qqq_ret = ret.get("QQQ", pd.Series(dtype=float))
-        for t,_,_ in RS_PAIRS:
-            if t in ret.columns and len(qqq_ret) > 0:
-                rs_series = ret[t] - qqq_ret
-                hist_rs[t] = {
-                    "rs_5d":  float(rs_series.tail(5).mean()),
-                    "rs_20d": float(rs_series.tail(20).mean()),
-                }
+        for t, b in bench_items:
+            if t in ret.columns and b in ret.columns:
+                rs_series = (ret[t] - ret[b]).dropna()
+                if len(rs_series) > 0:
+                    hist_rs[t] = {
+                        "rs_5d":  float(rs_series.tail(5).mean()),
+                        "rs_20d": float(rs_series.tail(20).mean()),
+                    }
     except Exception:
         pass
 
-    for ticker, label, bench in RS_PAIRS:
-        d    = quote_map.get(ticker, {})
-        pct  = _pct(d)
-        rs   = (pct - qqq_pct) if (pct is not None and qqq_pct is not None) else None
-        h    = hist_rs.get(ticker, {})
+    results = {}
+    for ticker, bench in bench_items:
+        d   = quote_map.get(ticker, {})
+        bd  = quote_map.get(bench, {})
+        pct = _pct(d)
+        bpct = _pct(bd)
+        rs  = (pct - bpct) if (pct is not None and bpct is not None) else None
+        h   = hist_rs.get(ticker, {})
         results[ticker] = dict(
-            label   = label,
-            pct     = pct,
-            qqq_pct = qqq_pct,
-            rs      = rs,          # today's RS vs QQQ
-            rs_5d   = h.get("rs_5d"),
-            rs_20d  = h.get("rs_20d"),
-            price   = d.get("pre_price") if is_pre else d.get("price"),
+            label     = ticker,
+            bench     = bench,
+            pct       = pct,
+            bench_pct = bpct,
+            rs        = rs,
+            rs_5d     = h.get("rs_5d"),
+            rs_20d    = h.get("rs_20d"),
+            price     = d.get("pre_price") if is_pre else d.get("price"),
         )
-    results["_qqq_pct"] = qqq_pct
     return results
 
 
-def _rs_verdict(tsla_rs: float | None, rs_5d: float | None) -> tuple[str, str, str]:
+def _rs_verdict(ticker: str, bench: str, rs: float | None) -> tuple[str, str, str]:
     """Return (verdict_text, bg_color, border_color)."""
-    if tsla_rs is None:
-        return "數據不足", "var(--flat-bg)", "var(--border)"
-    if tsla_rs >= 2.0:
-        return (f"🚀 <b>TSLA 強勢跑贏</b> QQQ {tsla_rs:+.2f}% — 公司/Musk催化驅動，可考慮重倉",
+    if rs is None:
+        return f"{ticker}：數據不足", "var(--flat-bg)", "var(--border)"
+    if rs >= 2.0:
+        return (f"🚀 <b>{ticker} 強勢跑贏</b> {bench} {rs:+.2f}% — 個股/公司催化驅動，動能明確",
                 "var(--up-bg)", "var(--up)")
-    if tsla_rs >= 0.5:
-        return (f"✅ <b>TSLA 小幅跑贏</b> QQQ {tsla_rs:+.2f}% — 溫和強勢，跟隨大市做多",
+    if rs >= 0.5:
+        return (f"✅ <b>{ticker} 小幅跑贏</b> {bench} {rs:+.2f}% — 溫和強勢，跟隨大市做多",
                 "var(--up-bg)", "var(--up)")
-    if tsla_rs >= -0.5:
-        return (f"◆ <b>TSLA 跟隨大市</b>（RS {tsla_rs:+.2f}%）— 大市倉，跟 VIX/QQQ 方向走",
+    if rs >= -0.5:
+        return (f"◆ <b>{ticker} 跟隨基準</b>（RS {rs:+.2f}% vs {bench}）— 方向看大市/VIX",
                 "var(--flat-bg)", "var(--muted)")
-    if tsla_rs >= -2.0:
-        return (f"⚠️ <b>TSLA 相對弱勢</b> {tsla_rs:+.2f}% vs QQQ — 避免做多，等強勢確認",
+    if rs >= -2.0:
+        return (f"⚠️ <b>{ticker} 相對弱勢</b> {rs:+.2f}% vs {bench} — 避免做多，等強勢確認",
                 "var(--down-bg)", "var(--down)")
-    return (f"🔴 <b>TSLA 嚴重跑輸</b> QQQ {tsla_rs:+.2f}% — 公司負面催化，做空或觀望",
+    return (f"🔴 <b>{ticker} 嚴重跑輸</b> {bench} {rs:+.2f}% — 個股負面催化，做空或觀望",
             "var(--down-bg)", "var(--down)")
 
 
-def render_relative_strength():
-    st.markdown('<div class="section-label">▸ ⚖️ TSLA 相對強弱 vs QQQ</div>',
-                unsafe_allow_html=True)
+def render_relative_strength(tickers):
+    tickers = list(tickers)
+    st.markdown(
+        f'<div class="section-label">▸ ⚖️ 相對強弱 · {" / ".join(tickers)} vs 基準</div>',
+        unsafe_allow_html=True)
+    items = _bench_items(tickers)
     with st.spinner("計算相對強弱..."):
-        rs_data = fetch_relative_strength()
+        rs_data = fetch_relative_strength(items)
 
-    qqq_pct = rs_data.get("_qqq_pct")
     now_lbl = datetime.now(pytz.timezone("America/New_York")).strftime("%H:%M ET")
-
     html = (
         '<div class="rs-wrap">'
         '<div class="rs-header">'
-        '<div class="rs-title">⚖️ 相對強弱 vs QQQ</div>'
+        '<div class="rs-title">⚖️ 相對強弱 vs 基準</div>'
         f'<div style="font-family:var(--mono,monospace);font-size:.6rem;color:var(--muted)">'
-        f'QQQ {fmt_pct(qqq_pct)} &nbsp;·&nbsp; {now_lbl}</div>'
+        f'基準依板塊自動選擇（可在側邊欄覆寫） &nbsp;·&nbsp; {now_lbl}</div>'
         '</div>'
         '<div class="rs-grid">'
     )
 
-    tsla_rs = None
-    for ticker, label, _ in RS_PAIRS:
-        d   = rs_data.get(ticker, {})
-        pct = d.get("pct")
-        rs  = d.get("rs")
-        r5  = d.get("rs_5d")
-        r20 = d.get("rs_20d")
+    for ticker, bench in items:
+        d    = rs_data.get(ticker, {})
+        pct  = d.get("pct")
+        rs   = d.get("rs")
+        r5   = d.get("rs_5d")
+        r20  = d.get("rs_20d")
 
-        if ticker == "TSLA": tsla_rs = rs
+        if rs is None:      card_cls = ""
+        elif rs >= 0.5:     card_cls = "outperform"
+        elif rs <= -0.5:    card_cls = "underperform"
+        else:               card_cls = ""
 
-        # Card class
-        if rs is None:          card_cls = ""
-        elif rs >= 0.5:         card_cls = "outperform"
-        elif rs <= -0.5:        card_cls = "underperform"
-        else:                   card_cls = ""
-
-        # Bar: center=50%, each 1% = 5px, capped ±10%
-        bar_pct   = min(max((rs or 0), -10), 10)   # clamp -10 to +10
-        bar_left  = 50.0
-        bar_width = abs(bar_pct) * 2.5              # 2.5% width per 1% RS
+        bar_pct   = min(max((rs or 0), -10), 10)
+        bar_width = abs(bar_pct) * 2.5
         bar_color = "var(--up)" if (rs or 0) >= 0 else "var(--down)"
         if (rs or 0) >= 0:
-            bar_style = f"left:{bar_left}%;width:{bar_width}%;background:{bar_color};"
+            bar_style = f"left:50%;width:{bar_width}%;background:{bar_color};"
         else:
-            bar_style = f"left:{bar_left - bar_width}%;width:{bar_width}%;background:{bar_color};"
+            bar_style = f"left:{50 - bar_width}%;width:{bar_width}%;background:{bar_color};"
 
-        r5_str  = (f"{r5:+.2f}%" if r5  is not None else "—")
-        r20_str = (f"{r20:+.2f}%" if r20 is not None else "—")
+        r5_str  = f"{r5:+.2f}%"  if r5  is not None else "—"
+        r20_str = f"{r20:+.2f}%" if r20 is not None else "—"
 
         html += (
             f'<div class="rs-card {card_cls}">'
-            f'<div class="rs-label">{label}</div>'
+            f'<div class="rs-label">{ticker}</div>'
             f'<div class="rs-val {cc(pct)}">{fmt_pct(pct)}</div>'
-            f'<div class="rs-sub">vs QQQ <b class="{cc(rs)}">{fmt_pct(rs)}</b></div>'
+            f'<div class="rs-sub">vs {bench} <b class="{cc(rs)}">{fmt_pct(rs)}</b></div>'
             f'<div class="rs-bar-wrap">'
             f'<div class="rs-bar-zero"></div>'
             f'<div class="rs-bar-fill" style="{bar_style}"></div>'
@@ -2765,33 +2719,29 @@ def render_relative_strength():
         )
     html += '</div>'
 
-    # Verdict
-    tsla_d   = rs_data.get("TSLA", {})
-    verdict, bg, bc = _rs_verdict(tsla_rs, tsla_d.get("rs_5d"))
-
-    # Trend context from 5d/20d
-    r5  = tsla_d.get("rs_5d")
-    r20 = tsla_d.get("rs_20d")
-    trend_txt = ""
-    if r5 is not None and r20 is not None:
-        if r5 > r20 + 0.3:
-            trend_txt = f" &nbsp;·&nbsp; 近5日均RS {r5:+.2f}% 強於20日 {r20:+.2f}%，動能改善"
-        elif r5 < r20 - 0.3:
-            trend_txt = f" &nbsp;·&nbsp; 近5日均RS {r5:+.2f}% 弱於20日 {r20:+.2f}%，動能惡化"
-        else:
-            trend_txt = f" &nbsp;·&nbsp; RS趨勢穩定（5D {r5:+.2f}% / 20D {r20:+.2f}%）"
-
-    html += (
-        f'<div class="rs-verdict" style="background:{bg};border-left:3px solid {bc}">'
-        f'{verdict}{trend_txt}'
-        f'</div>'
-        f'</div>'
-    )
+    # 每檔一行判讀
+    for ticker, bench in items:
+        d = rs_data.get(ticker, {})
+        verdict, bg, bc = _rs_verdict(ticker, bench, d.get("rs"))
+        r5, r20 = d.get("rs_5d"), d.get("rs_20d")
+        trend_txt = ""
+        if r5 is not None and r20 is not None:
+            if r5 > r20 + 0.3:
+                trend_txt = f" &nbsp;·&nbsp; 近5日均RS {r5:+.2f}% 強於20日 {r20:+.2f}%，動能改善"
+            elif r5 < r20 - 0.3:
+                trend_txt = f" &nbsp;·&nbsp; 近5日均RS {r5:+.2f}% 弱於20日 {r20:+.2f}%，動能惡化"
+            else:
+                trend_txt = f" &nbsp;·&nbsp; RS趨勢穩定（5D {r5:+.2f}% / 20D {r20:+.2f}%）"
+        html += (
+            f'<div class="rs-verdict" style="background:{bg};border-left:3px solid {bc};margin-top:.35rem">'
+            f'{verdict}{trend_txt}</div>'
+        )
+    html += '</div>'
     st.markdown(html, unsafe_allow_html=True)
 
 
 # ── #4 Put/Call Ratio ─────────────────────────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_resource(ttl=300, show_spinner=False)
 def _make_yf_ticker(symbol: str):
     """Create yf.Ticker with curl_cffi session for cloud compatibility."""
     try:
@@ -2894,11 +2844,13 @@ def _pc_signal(ratio: float | None, ticker: str) -> tuple[str, str, str, str]:
             "extreme-greed", "var(--down-bg)", "var(--down)")
 
 
-def render_put_call_panel():
+def render_put_call_panel(tickers):
+    tickers = list(tickers)
+    names = list(dict.fromkeys(tickers + ["SPY"]))   # 重點股票 + SPY 作大市參照
     st.markdown('<div class="section-label">▸ 📊 期權 Put/Call Ratio · 情緒極值偵測</div>',
                 unsafe_allow_html=True)
     with st.spinner("抓取期權數據..."):
-        pc_data = fetch_put_call_ratio(["TSLA", "SPY", "QQQ"])
+        pc_data = fetch_put_call_ratio(names)
 
     now_lbl = datetime.now(pytz.timezone("America/New_York")).strftime("%H:%M ET")
 
@@ -2912,38 +2864,35 @@ def render_put_call_panel():
         '<div class="pc-grid">'
     )
 
-    signal_rows = []
-    for ticker in ["TSLA", "SPY", "QQQ"]:
+    for ticker in names:
         d = pc_data.get(ticker, {})
         if d.get("error"):
+            err = str(d["error"])
+            if "no options" in err:
+                err = "此標的無期權數據"
             html += (
                 f'<div class="pc-card">'
                 f'<div class="pc-label">{ticker}</div>'
                 f'<div class="pc-val flat">—</div>'
-                f'<div class="pc-sub">{d["error"][:30]}</div>'
+                f'<div class="pc-sub">{_html.escape(err[:30])}</div>'
                 f'</div>'
             )
             continue
 
-        ratio        = d.get("pc_ratio")      # primary ratio (OI pre-market, vol regular)
-        pc_vol_raw   = d.get("pc_vol")       # raw volume ratio
-        oi_rat       = d.get("pc_oi_all")    # OI P/C (all near expiries)
+        ratio        = d.get("pc_ratio")
+        pc_vol_raw   = d.get("pc_vol")
+        oi_rat       = d.get("pc_oi_all")
         pre_mkt_mode = d.get("pre_market_mode", False)
-        expiry  = d.get("expiry","")
-        put_vol = d.get("put_vol",0)
-        call_vol= d.get("call_vol",0)
+        expiry   = d.get("expiry", "")
+        put_vol  = d.get("put_vol", 0)
+        call_vol = d.get("call_vol", 0)
 
         sig_txt, card_cls, bg, bc = _pc_signal(ratio, ticker)
-        signal_rows.append((sig_txt, bg, bc))
-
-        # Meter: 0.4=left edge, 1.6=right edge, neutral zone 0.6-0.9
-        # map ratio to 0-100%: (ratio-0.3)/(1.7-0.3)*100
         meter_pct = max(0, min(100, (((ratio or 0.7) - 0.3) / 1.4) * 100))
-
         ratio_col = "down" if (ratio or 0) < 0.6 else ("up" if (ratio or 0) > 1.0 else "flat")
 
-        _mode_lbl = "OI比率(盤前)" if pre_mkt_mode else "Vol P/C"
-        _vol_sub  = f"Vol {pc_vol_raw:.2f}" if pc_vol_raw else "Vol 盤前量不足"
+        _mode_lbl  = "OI比率(盤前)" if pre_mkt_mode else "Vol P/C"
+        _vol_sub   = f"Vol {pc_vol_raw:.2f}" if pc_vol_raw else "Vol 盤前量不足"
         _ratio_str = f"{ratio:.2f}" if ratio else "—"
         _oi_str    = f"{oi_rat:.2f}" if oi_rat else "—"
         html += (
@@ -2958,40 +2907,45 @@ def render_put_call_panel():
         )
     html += '</div>'
 
-    # Signal rows — TSLA first, most important
-    for sig_txt, bg, bc in signal_rows[:1]:   # only TSLA verdict prominent
+    # 每檔重點股票一行判讀
+    spy_r = pc_data.get("SPY", {}).get("pc_ratio")
+    for ticker in tickers:
+        d = pc_data.get(ticker, {})
+        if d.get("error"):
+            continue
+        ratio = d.get("pc_ratio")
+        sig_txt, _, bg, bc = _pc_signal(ratio, ticker)
         html += (
-            f'<div class="pc-signal" style="background:{bg};border-left:3px solid {bc}">'
-            f'{sig_txt}'
-            f'</div>'
+            f'<div class="pc-signal" style="background:{bg};border-left:3px solid {bc};margin-top:.35rem">'
+            f'{sig_txt}</div>'
         )
+        # 與 SPY 對照
+        if ratio is not None and spy_r is not None and ticker != "SPY":
+            combo_bg, combo_bc = "var(--flat-bg)", "var(--border)"
+            if ratio > 1.2 and spy_r > 0.9:
+                combo = f"📍 {ticker} + SPY 雙雙恐慌 — 市場底部訊號，做多勝率提高"
+                combo_bg, combo_bc = "var(--up-bg)", "var(--up)"
+            elif ratio < 0.6 and spy_r < 0.6:
+                combo = f"📍 {ticker} + SPY 雙雙貪婪 — 系統性過度樂觀，對沖風險"
+                combo_bg, combo_bc = "var(--down-bg)", "var(--down)"
+            elif ratio > 1.2 and spy_r < 0.7:
+                combo = f"📍 {ticker} 個股恐慌 / 大市平靜 — 個股特定風險，避免重倉"
+                combo_bg, combo_bc = "var(--flat-bg)", "var(--accent)"
+            elif ratio < 0.6 and spy_r > 1.0:
+                combo = f"📍 {ticker} Call主導 / 大市謹慎 — 個股超樂觀，謹防回調"
+                combo_bg, combo_bc = "var(--down-bg)", "var(--down)"
+            else:
+                combo = f"SPY P/C {spy_r:.2f} · {ticker} P/C {ratio:.2f} — 無極端分歧"
+            html += (
+                f'<div class="pc-signal" style="background:{combo_bg};border-left:3px solid {combo_bc};margin-top:.25rem">'
+                f'{combo}</div>'
+            )
 
-    # Combined reading
-    tsla_r = pc_data.get("TSLA",{}).get("pc_ratio")
-    spy_r  = pc_data.get("SPY",{}).get("pc_ratio")
-    if tsla_r is not None and spy_r is not None:
-        combo_bg = "var(--flat-bg)"; combo_bc = "var(--border)"
-        if tsla_r > 1.2 and spy_r > 0.9:
-            combo = "📍 TSLA + SPY 雙雙恐慌 — 市場底部訊號，做多勝率提高"
-            combo_bg = "var(--up-bg)"; combo_bc = "var(--up)"
-        elif tsla_r < 0.6 and spy_r < 0.6:
-            combo = "📍 TSLA + SPY 雙雙貪婪 — 系統性過度樂觀，對沖風險"
-            combo_bg = "var(--down-bg)"; combo_bc = "var(--down)"
-        elif tsla_r > 1.2 and spy_r < 0.7:
-            combo = "📍 TSLA 個股恐慌 / 大市平靜 — TSLA特定風險，避免重倉"
-            combo_bg = "var(--flat-bg)"; combo_bc = "var(--accent)"
-        elif tsla_r < 0.6 and spy_r > 1.0:
-            combo = "📍 TSLA Call主導 / 大市謹慎 — TSLA超樂觀，謹防回調"
-            combo_bg = "var(--down-bg)"; combo_bc = "var(--down)"
-        else:
-            combo = f"SPY P/C {spy_r:.2f} · TSLA P/C {tsla_r:.2f} — 無極端分歧"
-
-        html += (
-            f'<div class="pc-signal" style="background:{combo_bg};border-left:3px solid {combo_bc};margin-top:.4rem">'
-            f'{combo}'
-            f'</div>'
-        )
-
+    html += (
+        '<div style="font-family:var(--mono,monospace);font-size:.58rem;color:var(--muted);margin-top:.4rem">'
+        '※ 不同股票的「正常」P/C 區間不同（如 TSLA 對沖需求高、P/C 天然偏高），極值判讀請對照該股自身歷史。'
+        '</div>'
+    )
     html += '</div>'
     st.markdown(html, unsafe_allow_html=True)
 
@@ -3025,20 +2979,23 @@ def _should_send(msg_hash: str) -> bool:
 
 def check_and_push_alerts(
     token: str, chat_id: str,
-    tsla_data: dict, vix_data: dict,
+    focus_data: dict, vix_data: dict,
     yield_data: dict, sector_data: list,
-    tech_data: dict | None = None,
+    tech_map: dict | None = None,
 ) -> list[str]:
     """
-    Check all alert conditions and push Telegram messages.
+    Check all alert conditions for ALL focus tickers and push Telegram messages.
+    focus_data: {ticker: quote_dict}   tech_map: {ticker: technicals_dict}
     Returns list of sent message summaries (for UI log).
     """
     if not token or not chat_id: return []
     sent_log = []
     et_now   = datetime.now(pytz.timezone("America/New_York")).strftime("%H:%M ET")
     thr_vix  = st.session_state.get("tg_vix_threshold", 25.0)
-    thr_tsla = st.session_state.get("tg_tsla_pct_threshold", 3.0)
+    thr_move = st.session_state.get("tg_tsla_pct_threshold", 3.0)
     thr_y10  = st.session_state.get("tg_yield_threshold", 4.5)
+    et_t     = datetime.now(pytz.timezone("America/New_York")).time()
+    _is_pre  = time(4, 0) <= et_t < time(9, 30)
 
     def _push(msg: str, emoji: str = "📡"):
         h = _tg_dedup(msg)
@@ -3047,30 +3004,33 @@ def check_and_push_alerts(
             if _tg_send(token, chat_id, full):
                 sent_log.append(msg[:60] + "…" if len(msg) > 60 else msg)
 
-    # ── 1. TSLA price alerts (user-defined) ──
-    if tsla_data and not tsla_data.get("error"):
-        et_t = datetime.now(pytz.timezone("America/New_York")).time()
-        _is_pre = time(4,0) <= et_t < time(9,30)
-        cur_price = tsla_data.get("pre_price") if _is_pre else tsla_data.get("price")
-        if cur_price:
-            for a in st.session_state.get("price_alerts", []):
-                if a["ticker"].upper() != "TSLA": continue
-                tgt = a["price"]
-                if a["direction"] == "突破上方" and cur_price >= tgt:
-                    _push(f"🚀 TSLA 突破 <b>${tgt:.2f}</b>！\n現價：<b>${cur_price:.2f}</b>", "🚨")
-                elif a["direction"] == "跌破下方" and cur_price <= tgt:
-                    _push(f"⚠️ TSLA 跌破 <b>${tgt:.2f}</b>！\n現價：<b>${cur_price:.2f}</b>", "🚨")
+    def _cur_price(d):
+        if not d or d.get("error"): return None
+        return d.get("pre_price") if (_is_pre and d.get("pre_price")) else d.get("price")
 
-    # ── 2. TSLA pre-market big move ──
-    if tsla_data and not tsla_data.get("error"):
-        pct = tsla_data.get("pre_pct") or tsla_data.get("reg_pct")
-        price = tsla_data.get("pre_price") or tsla_data.get("price")
-        if pct is not None and abs(pct) >= thr_tsla:
+    # ── 1. 用戶自訂價位警報（任何代號）──
+    for a in st.session_state.get("price_alerts", []):
+        sym = a["ticker"].upper()
+        d   = focus_data.get(sym) or fetch_quote(sym)
+        cur = _cur_price(d)
+        if not cur: continue
+        tgt = a["price"]
+        if a["direction"] == "突破上方" and cur >= tgt:
+            _push(f"🚀 {sym} 突破 <b>${tgt:.2f}</b>！\n現價：<b>${cur:.2f}</b>", "🚨")
+        elif a["direction"] == "跌破下方" and cur <= tgt:
+            _push(f"⚠️ {sym} 跌破 <b>${tgt:.2f}</b>！\n現價：<b>${cur:.2f}</b>", "🚨")
+
+    # ── 2. 每檔重點股票大幅波動 ──
+    for sym, d in focus_data.items():
+        if not d or d.get("error"): continue
+        pct   = d.get("pre_pct") if (_is_pre and d.get("pre_pct") is not None) else d.get("reg_pct")
+        price = _cur_price(d)
+        if pct is not None and abs(pct) >= thr_move:
             direction = "急升 🚀" if pct > 0 else "急跌 🔴"
             _push(
-                f"TSLA {direction} <b>{pct:+.2f}%</b>\n"
+                f"{sym} {direction} <b>{pct:+.2f}%</b>\n"
                 f"現價：<b>${fmt_num(price)}</b>\n"
-                f"閾值：±{thr_tsla:.1f}%",
+                f"閾值：±{thr_move:.1f}%",
                 "🚨"
             )
 
@@ -3090,10 +3050,10 @@ def check_and_push_alerts(
         if not y10.get("error") and y10.get("value"):
             val = y10["value"]
             if val >= thr_y10:
-                bp  = y10.get("bp", 0)
+                bp = y10.get("bp", 0)
                 _push(
                     f"10年期美債殖利率 <b>{val:.3f}%</b> ≥ {thr_y10:.1f}%\n"
-                    f"今日變動：{bp:+.1f}bp — 科技股估值承壓",
+                    f"今日變動：{bp:+.1f}bp — 成長股估值承壓",
                     "🏦"
                 )
 
@@ -3101,7 +3061,7 @@ def check_and_push_alerts(
     if sector_data:
         valid = [s for s in sector_data if not s.get("error") and s.get("pct") is not None]
         if len(valid) >= 2:
-            top    = valid[0];  bot = valid[-1]
+            top, bot = valid[0], valid[-1]
             spread = (top["pct"] or 0) - (bot["pct"] or 0)
             if spread >= 3.0:
                 _push(
@@ -3111,21 +3071,20 @@ def check_and_push_alerts(
                     "🔄"
                 )
 
-    # ── 6. ATR compression breakout (if tech data available) ──
-    if tech_data and not tech_data.get("error"):
-        if tech_data.get("atr_ratio", 1) < 0.65:
-            atr = tech_data["atr"]
+    # ── 6. 每檔 ATR 壓縮 ──
+    for sym, tech in (tech_map or {}).items():
+        if tech and not tech.get("error") and tech.get("atr_ratio", 1) < 0.65:
             _push(
-                f"TSLA ATR壓縮 ({tech_data['atr_ratio']:.2f}x均值)\n"
-                f"ATR=${atr:.2f} — 蓄勢待發，注意方向突破\n"
-                f"突破上方 ${tech_data['atr_target1']:.2f} / 下方 ${tech_data['atr_stop_long']:.2f}",
+                f"{sym} ATR壓縮 ({tech['atr_ratio']:.2f}x均值)\n"
+                f"ATR=${tech['atr']:.2f} — 蓄勢待發，注意方向突破\n"
+                f"突破上方 ${tech['atr_target1']:.2f} / 下方 ${tech['atr_stop_long']:.2f}",
                 "⚡"
             )
 
     return sent_log
 
 
-def render_telegram_panel(tsla_data, vix_data, yield_data, sector_data, tech_data=None):
+def render_telegram_panel(focus_data, vix_data, yield_data, sector_data, tech_map=None):
     """Render Telegram push log in sidebar — call after all data fetched."""
     if not st.session_state.get("tg_token") or not st.session_state.get("tg_chat_id"):
         return
@@ -3133,7 +3092,7 @@ def render_telegram_panel(tsla_data, vix_data, yield_data, sector_data, tech_dat
     log = check_and_push_alerts(
         st.session_state["tg_token"],
         st.session_state["tg_chat_id"],
-        tsla_data, vix_data, yield_data, sector_data, tech_data
+        focus_data, vix_data, yield_data, sector_data, tech_map
     )
     if log:
         html = '<div class="tg-log">'
@@ -3171,9 +3130,12 @@ def fetch_news(query: str, serper_key: str, cache_buster: int = 0) -> list:
         return []
 
 @st.cache_data(ttl=180, show_spinner=False)
-def groq_news_summary(articles: list, topic: str, groq_key: str, cache_buster: int = 0) -> dict:
+def groq_news_summary(articles: list, topic: str, groq_key: str,
+                      focus: tuple = (), cache_buster: int = 0) -> dict:
+    empty = {"summary":"","signal":"neutral","signal_reason":"","bullets":[],
+             "focus_impact":{},"stale_warning":False}
     if not articles or not groq_key:
-        return {"summary":"","signal":"neutral","signal_reason":"","bullets":[],"tsla_impact":"","stale_warning":False}
+        return empty
     today = _today_et_str()
     tagged = []
     stale_count = 0
@@ -3183,12 +3145,15 @@ def groq_news_summary(articles: list, topic: str, groq_key: str, cache_buster: i
         tagged.append(f"[{fresh_tag}] 標題：{a.get('title','')}\n來源：{a.get('source','')} | 時間：{a.get('date','未知')}\n內容：{a.get('snippet','')}")
     block = "\n\n".join(tagged)
     has_stale = stale_count > len(articles[:6]) // 2
+    focus = tuple(focus)
+    focus_tpl = ", ".join(f'"{t}":"{t}今日一句影響（無關則寫無明顯影響）"' for t in focus)
+    focus_note = f"影響分析請針對這些個股：{', '.join(focus)}。" if focus else ""
     prompt = f"""你是美股即時交易員分析師。今日日期：{today}（美東時間）
-分析以下「{topic}」新聞，**只根據標記為🟢今日的新聞**生成摘要。
+分析以下「{topic}」新聞，**只根據標記為🟢今日的新聞**生成摘要。{focus_note}
 若所有新聞都是🔴舊聞，請在 summary 開頭說明「⚠️ 未找到今日最新消息，以下為近期背景資訊」。
 新聞：\n{block}
 輸出純 JSON（無其他文字、無 markdown）：
-{{"signal":"bullish|bearish|neutral","signal_reason":"15字內","summary":"2-3句","bullets":[{{"text":"重點1","level":"red|amber|green"}},{{"text":"重點2","level":"red|amber|green"}}],"tsla_impact":"TSLA今日一句影響","stale_warning":{str(has_stale).lower()}}}"""
+{{"signal":"bullish|bearish|neutral","signal_reason":"15字內","summary":"2-3句","bullets":[{{"text":"重點1","level":"red|amber|green"}},{{"text":"重點2","level":"red|amber|green"}}],"focus_impact":{{{focus_tpl}}},"stale_warning":{str(has_stale).lower()}}}"""
     try:
         raw = groq_chat(prompt, groq_key, max_tokens=900, temperature=0.2)
         raw = raw.replace("```json","").replace("```","").strip()
@@ -3196,9 +3161,11 @@ def groq_news_summary(articles: list, topic: str, groq_key: str, cache_buster: i
         result["stale_warning"] = result.get("stale_warning", has_stale)
         return result
     except Exception:
-        return {"summary":"AI 摘要失敗","signal":"neutral","signal_reason":"","bullets":[],"tsla_impact":"","stale_warning":False}
+        empty["summary"] = "AI 摘要失敗"
+        return empty
 
-def render_intel_panel(title: str, query: str, serper_key: str, groq_key: str, icon: str = "📡"):
+def render_intel_panel(title: str, query: str, serper_key: str, groq_key: str,
+                       icon: str = "📡", focus: tuple = ()):
     st.markdown(f'<div class="section-label">▸ {icon} {title}</div>', unsafe_allow_html=True)
     if not serper_key:
         st.markdown('<div class="intel-panel"><div style="font-size:.75rem;color:var(--muted);text-align:center;padding:1rem">請輸入 Serper API Key</div></div>',
@@ -3224,7 +3191,7 @@ def render_intel_panel(title: str, query: str, serper_key: str, groq_key: str, i
     ai = {}
     if groq_key:
         with st.spinner("Groq 分析中..."):
-            ai = groq_news_summary(articles, title, groq_key, cache_buster=buster)
+            ai = groq_news_summary(articles, title, groq_key, focus=tuple(focus), cache_buster=buster)
 
     signal    = ai.get("signal","neutral")
     sig_cls   = {"bullish":"signal-bullish","bearish":"signal-bearish"}.get(signal,"signal-neutral")
@@ -3232,7 +3199,7 @@ def render_intel_panel(title: str, query: str, serper_key: str, groq_key: str, i
     sig_reason= ai.get("signal_reason","")
     summary   = ai.get("summary","")
     bullets   = ai.get("bullets",[])
-    tsla_imp  = ai.get("tsla_impact","")
+    focus_imp = ai.get("focus_impact") or ai.get("tsla_impact") or {}
     stale_warn= ai.get("stale_warning",False)
     now_str   = datetime.now(pytz.timezone("America/New_York")).strftime("%H:%M ET")
     today     = _today_et_str()
@@ -3267,21 +3234,270 @@ def render_intel_panel(title: str, query: str, serper_key: str, groq_key: str, i
                  f'<div class="news-source" style="color:{dot_col}">[{tag}] {_html.escape(a.get("source",""))} · {_html.escape(a.get("date",""))}</div>'
                  f'</div></div>')
     html += '</div>'
-    if tsla_imp:
+    if focus_imp:
+        if isinstance(focus_imp, str):
+            focus_imp = {(focus[0] if focus else "個股"): focus_imp}
+        _rows = "".join(
+            f'<div style="margin-top:.2rem">🎯 <b>{_html.escape(str(k))}</b>：'
+            f'<span style="color:var(--text)">{_html.escape(str(v))}</span></div>'
+            for k, v in focus_imp.items())
         html += (f'<div style="margin-top:.65rem;padding-top:.55rem;border-top:1px solid var(--border);'
-                 f'font-family:var(--mono,monospace);font-size:.68rem;color:var(--muted)">'
-                 f'🚗 TSLA 影響：<span style="color:var(--text)">{_html.escape(tsla_imp)}</span></div>')
+                 f'font-family:var(--mono,monospace);font-size:.68rem;color:var(--muted)">{_rows}</div>')
     html += "</div>"
     st.markdown(html, unsafe_allow_html=True)
 
 
-# ── AI Prompt Generator ───────────────────────────────────────────────────────
-def generate_trading_prompt(events, oil_data, tsla_data, vix_data, qqq_data, is_pre) -> str:
+# ── Focus tickers (多股票管理) ────────────────────────────────────────────────
+MAX_FOCUS = 6
+_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,11}$")
+
+# 預設基準：大型科技/成長股對 QQQ，其餘依板塊對應 SPDR 板塊 ETF，查不到用 SPY
+DEFAULT_BENCH = {
+    "TSLA": "QQQ", "NVDA": "QQQ", "AAPL": "QQQ", "MSFT": "QQQ", "AMZN": "QQQ",
+    "GOOGL": "QQQ", "GOOG": "QQQ", "META": "QQQ", "AMD": "QQQ", "AVGO": "QQQ",
+    "NFLX": "QQQ", "TSM": "QQQ", "PLTR": "QQQ",
+}
+SECTOR_BENCHMARK = {
+    "Technology": "XLK", "Financial Services": "XLF", "Energy": "XLE",
+    "Healthcare": "XLV", "Industrials": "XLI", "Consumer Cyclical": "XLY",
+    "Communication Services": "XLC", "Utilities": "XLU",
+}
+BENCH_CHOICES = ["自動", "QQQ", "SPY", "IWM", "DIA",
+                 "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLC", "XLU"]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_stock_meta(sym: str) -> dict:
+    """公司名 / 板塊 / Beta（僅用於基準自動選擇，失敗時靜默）。"""
+    try:
+        info = _make_yf_ticker(sym).info or {}
+        return dict(name=info.get("shortName") or info.get("longName"),
+                    sector=info.get("sector"), beta=info.get("beta"))
+    except Exception:
+        return dict(name=None, sector=None, beta=None)
+
+
+def get_focus_tickers() -> list:
+    return list(st.session_state.get("focus_tickers") or ["TSLA"])
+
+
+def get_name(sym: str) -> str:
+    n = st.session_state.focus_names.get(sym)
+    if n: return n
+    d = fetch_quote(sym)
+    return d.get("name") or sym if not d.get("error") else sym
+
+
+def get_benchmark(ticker: str) -> str:
+    ov = st.session_state.focus_bench.get(ticker, "自動")
+    if ov and ov != "自動":
+        bench = ov
+    elif ticker in DEFAULT_BENCH:
+        bench = DEFAULT_BENCH[ticker]
+    else:
+        sector = fetch_stock_meta(ticker).get("sector") or ""
+        bench = SECTOR_BENCHMARK.get(sector, "SPY")
+    if bench == ticker:
+        bench = "SPY" if ticker != "SPY" else "QQQ"
+    return bench
+
+
+def get_shares(ticker: str) -> int:
+    return int(st.session_state.focus_shares.get(ticker, 100))
+
+
+def _bench_items(tickers) -> tuple:
+    return tuple((t, get_benchmark(t)) for t in tickers)
+
+
+def parse_ticker_input(raw: str) -> list:
+    toks = re.split(r"[,\s;，、]+", (raw or "").upper().strip())
+    return list(dict.fromkeys(t for t in toks if t))
+
+
+def add_focus_tickers(raw: str) -> list:
+    """回傳訊息列表（顯示給用戶）。成功加入的會直接寫入 session_state。"""
+    msgs = []
+    cur = get_focus_tickers()
+    for sym in parse_ticker_input(raw):
+        if not _TICKER_RE.match(sym):
+            msgs.append(f"❌ {sym} 格式無效"); continue
+        if sym in cur:
+            msgs.append(f"ℹ️ {sym} 已在清單中"); continue
+        if len(cur) >= MAX_FOCUS:
+            msgs.append(f"⚠️ 最多 {MAX_FOCUS} 檔，已略過 {sym}"); continue
+        d = fetch_quote(sym)
+        if d.get("error") or not (d.get("price") or d.get("prev")):
+            msgs.append(f"❌ 找不到 {sym}"); continue
+        cur.append(sym)
+        st.session_state.focus_names[sym] = d.get("name") or sym
+        if "." in sym:
+            msgs.append(f"⚠️ {sym} 疑似非美股：盤前/盤中時段判斷仍以美東時間計算")
+    st.session_state.focus_tickers = cur
+    return msgs
+
+
+def remove_focus_ticker(sym: str):
+    cur = [t for t in get_focus_tickers() if t != sym]
+    st.session_state.focus_tickers = cur or ["TSLA"]
+    st.session_state.focus_bench.pop(sym, None)
+    st.session_state.focus_shares.pop(sym, None)
+
+
+def sync_query_params():
+    """把清單寫進網址 ?t=TSLA,NVDA，重新整理或分享連結都不會丟。"""
+    try:
+        val = ",".join(get_focus_tickers())
+        if st.query_params.get("t", "") != val:
+            st.query_params["t"] = val
+    except Exception:
+        pass
+
+
+def _init_focus_from_query():
+    if st.session_state.get("focus_loaded"):
+        return
+    st.session_state.focus_loaded = True
+    try:
+        raw = st.query_params.get("t", "")
+    except Exception:
+        raw = ""
+    syms = [s for s in parse_ticker_input(raw) if _TICKER_RE.match(s)][:MAX_FOCUS]
+    if syms:
+        st.session_state.focus_tickers = syms
+
+
+def render_focus_manager():
+    """側邊欄：重點股票增刪 + 每檔基準 / 持股設定。"""
+    st.markdown(f"### 🎯 重點股票（最多 {MAX_FOCUS} 檔）")
+    tickers = get_focus_tickers()
+
+    msg = st.session_state.pop("focus_msg", None)
+    if msg:
+        for m in msg:
+            st.caption(m)
+
+    for sym in tickers:
+        c1, c2 = st.columns([5, 1])
+        with c1:
+            st.markdown(
+                f'<div style="font-family:var(--mono,monospace);font-size:.8rem;padding:.25rem 0">'
+                f'<b>{sym}</b> <span style="color:var(--muted,#8A8278);font-size:.68rem">'
+                f'{_html.escape(str(st.session_state.focus_names.get(sym, "")))}</span></div>',
+                unsafe_allow_html=True)
+        with c2:
+            if st.button("✕", key=f"rm_focus_{sym}", disabled=len(tickers) <= 1):
+                remove_focus_ticker(sym)
+                st.rerun()
+
+    if len(tickers) < MAX_FOCUS:
+        with st.form("add_focus_form", clear_on_submit=True):
+            raw = st.text_input("新增代號", placeholder="NVDA, AAPL, AMD（可一次輸入多檔）")
+            submitted = st.form_submit_button("➕ 加入")
+        if submitted and raw.strip():
+            st.session_state.focus_msg = add_focus_tickers(raw)
+            st.rerun()
+    else:
+        st.caption(f"已達上限 {MAX_FOCUS} 檔，請先移除再新增")
+
+    with st.expander("基準 / 持股設定", expanded=False):
+        for sym in tickers:
+            cur_b = st.session_state.focus_bench.get(sym, "自動")
+            idx = BENCH_CHOICES.index(cur_b) if cur_b in BENCH_CHOICES else 0
+            c1, c2 = st.columns(2)
+            with c1:
+                b = st.selectbox(f"{sym} 基準", BENCH_CHOICES, index=idx, key=f"bench_{sym}",
+                                 help="自動：大型科技股用 QQQ，其餘依板塊對應 ETF")
+                st.session_state.focus_bench[sym] = b
+            with c2:
+                s = st.number_input(f"{sym} 股數", min_value=0, max_value=100000,
+                                    value=get_shares(sym), step=10, key=f"shares_{sym}")
+                st.session_state.focus_shares[sym] = int(s)
+    st.caption("🔗 清單會寫入網址 ?t=…，可直接收藏 / 分享")
+
+
+# ── 財報日 / TSLA 交付提醒 ────────────────────────────────────────────────────
+@st.cache_data(ttl=21600, show_spinner=False)
+def fetch_next_earnings(ticker: str) -> str | None:
+    """下一次財報日（ISO 字串）。ETF/指數/查不到 → None。"""
+    try:
+        cal = _make_yf_ticker(ticker).calendar
+        ed = None
+        if isinstance(cal, dict):
+            ed = cal.get("Earnings Date")
+        elif isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
+            ed = list(cal.loc["Earnings Date"].values)
+        if not ed:
+            return None
+        if not isinstance(ed, (list, tuple)):
+            ed = [ed]
+        today = datetime.now(pytz.timezone("America/New_York")).date()
+        cands = []
+        for x in ed:
+            d = pd.to_datetime(x).date()
+            if d >= today:
+                cands.append(d)
+        return min(cands).isoformat() if cands else None
+    except Exception:
+        return None
+
+
+def _tsla_next_delivery(today):
+    """下一個 TSLA 季度交付日（1/4/7/10 月第一個工作日）。"""
+    for add in range(0, 13):
+        m = (today.month - 1 + add) % 12 + 1
+        y = today.year + (today.month - 1 + add) // 12
+        if m not in (1, 4, 7, 10):
+            continue
+        d = datetime(y, m, 1).date()
+        while d.weekday() >= 5 or _is_us_holiday(d):
+            d += timedelta(days=1)
+        if d >= today:
+            return d
+    return None
+
+
+def _render_focus_reminders():
+    et_today = datetime.now(pytz.timezone("America/New_York")).date()
+    tickers = get_focus_tickers()
+    reminders = []
+
+    if "TSLA" in tickers:
+        dd = _tsla_next_delivery(et_today)
+        if dd:
+            n = (dd - et_today).days
+            if 0 <= n <= 7:
+                urgency = "🚨 今日" if n == 0 else f"📅 {n}日後"
+                reminders.append(
+                    f"🚗 {urgency} TSLA 季度交付數據預計 <b>{dd.strftime('%-m月%-d日')} ~06:00 ET</b> 發布 — "
+                    f"高於預期→缺口上升，低於預期→缺口下跌，Binary Event！")
+
+    for t in tickers:
+        ed = fetch_next_earnings(t)
+        if not ed:
+            continue
+        n = (datetime.strptime(ed, "%Y-%m-%d").date() - et_today).days
+        if 0 <= n <= 14:
+            when = "今日" if n == 0 else f"{n}日後"
+            reminders.append(
+                f"📊 {t} 財報 <b>{ed}</b>（{when}）— 提前留意 IV 急升與財報缺口風險")
+
+    for r in reminders:
+        st.markdown(
+            f'<div style="background:#EAF4EE;border-left:3px solid #3A7D5C;'
+            f'border-radius:0 4px 4px 0;padding:.45rem .85rem;font-family:var(--sans,sans-serif);'
+            f'font-size:.76rem;color:#1E4D35;margin-bottom:.3rem">{r}</div>',
+            unsafe_allow_html=True)
+
+
+# ── AI Prompt Generator（多股票）──────────────────────────────────────────────
+def generate_trading_prompt(events, oil_data, focus_data, vix_data, qqq_data, is_pre, tickers) -> str:
+    tickers = list(tickers)
     et        = pytz.timezone("America/New_York")
     now_et    = datetime.now(et)
     today_str = now_et.strftime("%Y-%m-%d")
     session   = "盤前" if is_pre else "盤中/盤後"
-    today_events = next((d.get("events",[]) for d in events if d["date"] == today_str), [])
+    today_events = next((d.get("events", []) for d in events if d["date"] == today_str), [])
     events_lines = "\n".join(
         [f"  - [{e.get('impact','').upper()}] {e.get('et_time','')+'ET ' if e.get('et_time') else ''}{e['text']} — {e.get('note','')}"
          for e in today_events]
@@ -3289,131 +3505,130 @@ def generate_trading_prompt(events, oil_data, tsla_data, vix_data, qqq_data, is_
     high_events = [e for e in today_events if e.get("impact") == "high"]
     high_lines  = "\n".join([f"  ⚠️ {e.get('et_time','')+'ET ' if e.get('et_time') else ''}{e['text']} — {e.get('note','')}" for e in high_events]) or "  （今日無已確認高影響事件）"
 
-    _et_t = datetime.now(pytz.timezone("America/New_York")).time()
-    _is_pre_t  = time(4,0)  <= _et_t < time(9,30)
-    _is_reg_t  = time(9,30) <= _et_t < time(16,0)
-    _is_post_t = time(16,0) <= _et_t < time(20,0)
+    _et_t = now_et.time()
+    _is_pre_t  = time(4, 0)  <= _et_t < time(9, 30)
+    _is_reg_t  = time(9, 30) <= _et_t < time(16, 0)
+    _is_post_t = time(16, 0) <= _et_t < time(20, 0)
+
     def snap(d):
         if not d or d.get("error"): return "N/A"
         if _is_pre_t and d.get("pre_price") and d.get("pre_pct") is not None:
-            p,pct,tag = d["pre_price"],d["pre_pct"],"盤前"
+            p, pct, tag = d["pre_price"], d["pre_pct"], "盤前"
         elif _is_reg_t and d.get("price") and d.get("reg_pct") is not None:
-            p,pct,tag = d["price"],d["reg_pct"],"盤中"
+            p, pct, tag = d["price"], d["reg_pct"], "盤中"
         elif _is_post_t and d.get("post_price") and d.get("post_pct") is not None:
-            p,pct,tag = d["post_price"],d["post_pct"],"盤後"
+            p, pct, tag = d["post_price"], d["post_pct"], "盤後"
         elif d.get("price") and d.get("reg_pct") is not None:
-            p,pct,tag = d["price"],d["reg_pct"],"收盤"
+            p, pct, tag = d["price"], d["reg_pct"], "收盤"
         elif d.get("pre_price") and d.get("pre_pct") is not None:
-            p,pct,tag = d["pre_price"],d["pre_pct"],"盤前"
-        else: p,pct,tag = d.get("price") or d.get("prev"),None,"收盤"
+            p, pct, tag = d["pre_price"], d["pre_pct"], "盤前"
+        else:
+            p, pct, tag = d.get("price") or d.get("prev"), None, "收盤"
         return f"{fmt_num(p)} {fmt_pct(pct) if pct is not None else '—'} [{tag}]"
 
-    wti   = (oil_data or {}).get("CL=F",{})
-    brent = (oil_data or {}).get("BZ=F",{})
+    wti   = (oil_data or {}).get("CL=F", {})
+    brent = (oil_data or {}).get("BZ=F", {})
     wti_pct   = wti.get("pct")
     wti_str   = f"${fmt_num(wti.get('price'))} ({fmt_pct(wti_pct)})" if wti.get("price") else "N/A"
     brent_str = f"${fmt_num(brent.get('price'))} ({fmt_pct(brent.get('pct'))})" if brent.get("price") else "N/A"
     wti_dir   = _oil_direction_label(wti_pct)
     vix_val   = fmt_num(vix_data.get("price")) if vix_data and not vix_data.get("error") else "N/A"
-    fetch_time = datetime.now(pytz.timezone("America/New_York")).strftime("%H:%M:%S ET")
+    fetch_time = now_et.strftime("%H:%M:%S ET")
 
-    # Add yield + sector data to prompt
-    yield_lines = ""
+    # 殖利率
     try:
-        yd = fetch_yields()
         y_parts = []
-        for tk, yd_item in yd.items():
+        for tk, yd_item in fetch_yields().items():
             if not yd_item.get("error") and yd_item.get("value"):
-                bp = yd_item.get("bp",0)
-                bp_s = f"+{bp:.1f}" if bp >= 0 else f"{bp:.1f}"
-                y_parts.append(f'{yd_item["label"]} {yd_item["value"]:.3f}% ({bp_s}bp)')
-        yield_lines = " | ".join(y_parts)
+                bp = yd_item.get("bp", 0)
+                y_parts.append(f'{yd_item["label"]} {yd_item["value"]:.3f}% ({"+" if bp >= 0 else ""}{bp:.1f}bp)')
+        yield_lines = " | ".join(y_parts) or "N/A"
     except Exception:
         yield_lines = "N/A"
 
-    sector_lines = ""
+    # 板塊
     try:
-        secs = fetch_sectors()
-        valid_s = [s for s in secs if not s.get("error") and s["pct"] is not None]
+        valid_s = [s for s in fetch_sectors() if not s.get("error") and s["pct"] is not None]
         if valid_s:
             top3    = " > ".join([f'{s["name_zh"]}({fmt_pct(s["pct"])})' for s in valid_s[:3]])
             bottom2 = " | ".join([f'{s["name_zh"]}({fmt_pct(s["pct"])})' for s in valid_s[-2:]])
             sector_lines = f"領漲：{top3} | 落後：{bottom2}"
+        else:
+            sector_lines = "N/A"
     except Exception:
         sector_lines = "N/A"
 
-    # Add DXY + BTC data to prompt
-    macro_lines = ""
+    # DXY / BTC / 黃金
     try:
         _ml = fetch_macro_leads()
         _parts = []
-        for _tk, _lbl in [("DX=F","DXY"),("BTC-USD","BTC"),("GC=F","黃金")]:
+        for _tk, _lbl in [("DX=F", "DXY"), ("BTC-USD", "BTC"), ("GC=F", "黃金")]:
             _md = _ml.get(_tk, {})
             if not _md.get("error") and _md.get("price"):
-                _p   = _md["price"]
-                _pct = _md.get("pct")
+                _p, _pct = _md["price"], _md.get("pct")
                 _pct_s = f"{_pct:+.2f}%" if _pct is not None else "—"
-                if _tk == "BTC-USD" and _p > 1000:
-                    _pstr = f"${_p:,.0f}"
-                elif _tk == "DX=F":
-                    _pstr = f"{_p:.3f}"
-                else:
-                    _pstr = f"${fmt_num(_p)}"
+                if _tk == "BTC-USD" and _p > 1000:   _pstr = f"${_p:,.0f}"
+                elif _tk == "DX=F":                  _pstr = f"{_p:.3f}"
+                else:                                _pstr = f"${fmt_num(_p)}"
                 _parts.append(f"{_lbl} {_pstr}({_pct_s})")
-        macro_lines = " | ".join(_parts)
+        macro_lines = " | ".join(_parts) or "N/A"
     except Exception:
         macro_lines = "N/A"
 
-    # Add RS data to prompt
-    rs_lines = ""
+    # ── 個股層：RS / P-C / 技術 / 財報 ──
     try:
-        _rs = fetch_relative_strength()
-        tsla_rs = _rs.get("TSLA",{})
-        qqq_p   = _rs.get("_qqq_pct")
-        if tsla_rs.get("rs") is not None:
-            rs_lines = (
-                f"TSLA今日RS vs QQQ: {tsla_rs['rs']:+.2f}% "
-                f"({'跑贏' if tsla_rs['rs']>0 else '跑輸'}) | "
-                f"5日均RS: {tsla_rs.get('rs_5d',0):+.2f}% | "
-                f"20日均RS: {tsla_rs.get('rs_20d',0):+.2f}% | "
-                f"QQQ今日: {fmt_pct(qqq_p)}"
-            )
+        rs_all = fetch_relative_strength(_bench_items(tickers))
     except Exception:
-        rs_lines = "N/A"
-
-    # Add P/C data to prompt
-    pc_lines = ""
+        rs_all = {}
     try:
-        _pc = fetch_put_call_ratio(["TSLA","SPY"])
-        tsla_pc = _pc.get("TSLA",{})
-        spy_pc  = _pc.get("SPY",{})
-        if not tsla_pc.get("error") and tsla_pc.get("pc_ratio"):
-            pc_lines = (
-                f"TSLA P/C(Vol)={tsla_pc['pc_ratio']:.2f} "
-                f"OI={tsla_pc.get('pc_oi_all','—'):.2f if isinstance(tsla_pc.get('pc_oi_all'),float) else '—'} | "
-                f"SPY P/C(Vol)={spy_pc.get('pc_ratio','—'):.2f if isinstance(spy_pc.get('pc_ratio'),float) else '—'}"
-            )
+        pc_all = fetch_put_call_ratio(list(dict.fromkeys(tickers + ["SPY"])))
     except Exception:
-        pc_lines = "N/A"
+        pc_all = {}
+    period = st.session_state.get("tech_period", "3mo")
 
-    # Add TSLA tech data to prompt if available
-    tech_lines = ""
-    try:
-        _t = fetch_tsla_technicals(st.session_state.get("tech_period","3mo"))
-        if not _t.get("error"):
-            tech_lines = (
-                f"EMA20=${fmt_num(_t['e20'])} EMA50=${fmt_num(_t['e50'])} EMA200=${fmt_num(_t['e200'])} | "
-                f"ATR=${_t['atr']:.2f}({_t['atr_ratio']:.1f}x) | "
-                f"RSI={_t['rsi']:.1f} | "
-                f"{'多頭對齊' if _t['bull_align'] else '空頭對齊' if _t['bear_align'] else 'EMA混亂'} | "
-                f"MACD {'金叉' if _t['macd']>_t['macd_sig'] else '死叉'} | "
-                f"止損=${_t['atr_stop_long']:.2f} 目標①=${_t['atr_target1']:.2f}"
-            )
-    except Exception:
-        tech_lines = "N/A"
+    table_rows, tech_blocks = [], []
+    for t in tickers:
+        d = focus_data.get(t) or fetch_quote(t)
+        r = rs_all.get(t, {})
+        if r.get("rs") is not None:
+            rs_txt = (f"{r['rs']:+.2f}% vs {r['bench']}（{'跑贏' if r['rs'] > 0 else '跑輸'}）"
+                      f" 5D {r['rs_5d']:+.2f}% 20D {r['rs_20d']:+.2f}%"
+                      if r.get("rs_5d") is not None and r.get("rs_20d") is not None
+                      else f"{r['rs']:+.2f}% vs {r['bench']}")
+        else:
+            rs_txt = "N/A"
+        p = pc_all.get(t, {})
+        if p.get("error") or p.get("pc_ratio") is None:
+            pc_txt = "N/A（無期權數據）"
+        else:
+            pc_txt = f"{p['pc_ratio']:.2f}"
+            if isinstance(p.get("pc_oi_all"), float):
+                pc_txt += f"（OI {p['pc_oi_all']:.2f}）"
+        ed = fetch_next_earnings(t) or "—"
+        table_rows.append(f"| {t} | {snap(d)} | {rs_txt} | {pc_txt} | {ed} |")
 
-    return f"""# 美股即時分析請求
+        try:
+            _t = fetch_technicals(t, period)
+            if not _t.get("error"):
+                tech_blocks.append(
+                    f"- **{t}**：EMA20=${fmt_num(_t['e20'])} EMA50=${fmt_num(_t['e50'])} EMA200=${fmt_num(_t['e200'])} | "
+                    f"ATR=${_t['atr']:.2f}({_t['atr_ratio']:.1f}x) | RSI={_t['rsi']:.1f} | "
+                    f"{'多頭對齊' if _t['bull_align'] else '空頭對齊' if _t['bear_align'] else 'EMA混亂'} | "
+                    f"MACD {'金叉' if _t['macd'] > _t['macd_sig'] else '死叉'} | "
+                    f"20日高/低 ${fmt_num(_t['r20h'])}/${fmt_num(_t['r20l'])} | "
+                    f"ATR止損=${_t['atr_stop_long']:.2f} 目標①=${_t['atr_target1']:.2f}")
+            else:
+                tech_blocks.append(f"- **{t}**：技術數據不可用")
+        except Exception:
+            tech_blocks.append(f"- **{t}**：技術數據不可用")
+
+    stocks_str = "、".join(tickers)
+    per_stock_q = "\n".join(
+        f"   - **{t}**：入場區間、止損位、目標位（$數字）、多/空/觀望結論" for t in tickers)
+
+    return f"""# 美股即時分析請求（多股票）
 日期：{today_str}  時間：{fetch_time}  時段：{session}  數據抓取：{fetch_time}
+關注標的：{stocks_str}
 
 ## 今日全部宏觀事件
 {events_lines}
@@ -3421,10 +3636,9 @@ def generate_trading_prompt(events, oil_data, tsla_data, vix_data, qqq_data, is_
 ## 今日高影響事件（重點）
 {high_lines}
 
-## 市場即時快照
+## 大環境快照
 | 指標 | 數值 |
 |------|------|
-| TSLA | {snap(tsla_data)} |
 | QQQ  | {snap(qqq_data)} |
 | VIX  | {vix_val} |
 | WTI 原油 | {wti_str} |
@@ -3432,16 +3646,23 @@ def generate_trading_prompt(events, oil_data, tsla_data, vix_data, qqq_data, is_
 | 美債殖利率 | {yield_lines} |
 | 板塊輪動 | {sector_lines} |
 | 宏觀先行 | {macro_lines} |
-| 相對強弱 | {rs_lines} |
-| Put/Call | {pc_lines} |
-| TSLA技術 | {tech_lines} |
+
+## 個股快照
+| 個股 | 即時價/漲跌 | 相對強弱 | Put/Call | 下次財報 |
+|------|------|------|------|------|
+{chr(10).join(table_rows)}
+
+## 個股技術面
+{chr(10).join(tech_blocks)}
 
 ## 請幫我分析：
-1. **今日最大風險/機會**是什麼？結合DXY/BTC先行指標，對 TSLA 和納指方向的影響？
-2. **油價{wti_dir} {wti_str}** 對今日科技股有何具體影響？
-3. **TSLA 今日交易策略**：根據上方技術數據，建議具體入場區間、止損位（參考ATR止損）、目標位（$數字）？
+1. **今日最大風險/機會**是什麼？結合 DXY/BTC 先行指標，對納指及上述各股的方向影響？
+2. **油價{wti_dir} {wti_str}** 對上述各股（注意不同板塊影響方向可能相反）有何具體影響？
+3. **各股今日交易策略**（根據上方技術數據，參考 ATR 止損）：
+{per_stock_q}
 4. **VIX {vix_val}** 顯示市場情緒如何？適合做多/做空/觀望？
-5. 今日最需要關注的**時間點**時序表（請列出今日所有已知ET時間，格式：HH:MM — 事件 — 預期影響方向）？
+5. 這 {len(tickers)} 檔股票之間**強弱排序**與相關性風險（是否同向暴露，倉位如何分散）？
+6. 今日最需要關注的**時間點**時序表（請列出今日所有已知ET時間，格式：HH:MM — 事件 — 預期影響方向）？
 
 **已知固定時間點參考**（請確認今日是否有以下發布）：
 - 08:30 ET — 若有CPI/PPI/非農/零售/PCE/初領失業金
@@ -3449,8 +3670,7 @@ def generate_trading_prompt(events, oil_data, tsla_data, vix_data, qqq_data, is_
 - 13:00 ET — Baker Hughes鑽井數（週五）
 - 14:00 ET — 若有FOMC利率決議
 - 14:30 ET — 若有Fed主席記者會
-- 盤後 — 若有科技財報（TSLA/NVDA/MSFT等）
-- TSLA Q2交付數據通常7月第一個工作日約06:00 ET發布
+- 盤後 — 若有重點股票財報（見上表「下次財報」）
 
 請用繁體中文回答，要具體，每點包含數字區間。"""
 
@@ -3467,9 +3687,10 @@ WATCHLISTS = {
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
+    _init_focus_from_query()
     inject_css()
 
-    # FIX #1: non-blocking autorefresh (must be called early)
+    # non-blocking autorefresh (must be called early)
     setup_autorefresh()
 
     now_et, session = get_session_info()
@@ -3480,17 +3701,19 @@ def main():
     with st.sidebar:
         st.markdown("### ⚙️ 設定")
 
-        # FIX #11: dark mode toggle
         dark = st.toggle("🌙 深色模式", value=st.session_state.dark_mode)
         if dark != st.session_state.dark_mode:
             st.session_state.dark_mode = dark
             st.rerun()
 
         st.markdown("---")
+        render_focus_manager()
+
+        st.markdown("---")
         auto = st.toggle("⏱️ 自動刷新", value=st.session_state.auto_refresh)
         st.session_state.auto_refresh = auto
         if auto:
-            iv = st.selectbox("刷新頻率（秒）",[30,60,120,300],index=1,format_func=lambda x:f"{x} 秒")
+            iv = st.selectbox("刷新頻率（秒）", [30, 60, 120, 300], index=1, format_func=lambda x: f"{x} 秒")
             st.session_state.refresh_interval = iv
             st.caption(f"下次刷新：每 {iv} 秒自動更新（非阻塞）")
 
@@ -3519,7 +3742,7 @@ def main():
                     min_value=15.0, max_value=50.0, step=0.5, format="%.1f")
             with c2:
                 st.session_state.tg_tsla_pct_threshold = st.number_input(
-                    "TSLA±%", value=float(st.session_state.tg_tsla_pct_threshold),
+                    "個股±%", value=float(st.session_state.tg_tsla_pct_threshold),
                     min_value=1.0, max_value=10.0, step=0.5, format="%.1f")
             with c3:
                 st.session_state.tg_yield_threshold = st.number_input(
@@ -3532,14 +3755,10 @@ def main():
 
         st.markdown("---")
         st.markdown("### 📐 技術分析設定")
-        st.session_state.tsla_shares = st.number_input(
-            "TSLA 持股數（風險計算）",
-            value=int(st.session_state.tsla_shares),
-            min_value=0, max_value=10000, step=10)
         st.session_state.tech_period = st.selectbox(
             "技術分析週期",
-            ["1mo","3mo","6mo","1y"], index=1,
-            format_func=lambda x: {"1mo":"1個月","3mo":"3個月","6mo":"6個月","1y":"1年"}[x])
+            ["1mo", "3mo", "6mo", "1y"], index=1,
+            format_func=lambda x: {"1mo": "1個月", "3mo": "3個月", "6mo": "6個月", "1y": "1年"}[x])
 
         st.markdown("---")
         render_alert_manager()
@@ -3553,9 +3772,10 @@ def main():
         st.markdown("---")
         st.markdown("### 顯示選項")
         show_macro   = st.checkbox("DXY/BTC先行",    value=True)
-        show_rs      = st.checkbox("TSLA相對強弱",   value=True)
+        show_rs      = st.checkbox("個股相對強弱",   value=True)
         show_pc      = st.checkbox("Put/Call Ratio", value=True)
-        show_tech    = st.checkbox("TSLA技術分析",   value=True)
+        show_tech    = st.checkbox("個股技術分析",   value=True)
+        show_stock_news = st.checkbox("個股新聞",    value=True)
         show_futures = st.checkbox("期貨代理",      value=True)
         show_vix     = st.checkbox("波動/恐慌",     value=True)
         show_lev     = st.checkbox("槓桿ETF",       value=False)
@@ -3573,15 +3793,19 @@ def main():
         if st.button("🔄 立即刷新全部"):
             st.cache_data.clear()
             st.session_state.weekly_events = None
-            st.session_state.weekly_events_fetched = ""   # force re-merge
+            st.session_state.weekly_events_fetched = ""
             st.rerun()
         if st.button("🗓️ 重新生成週曆"):
             st.session_state.weekly_events = None
             st.session_state.weekly_events_fetched = ""
             st.rerun()
 
+    # ── 重點股票（側邊欄處理完後才確定）──────────────────────────────────────
+    tickers = get_focus_tickers()
+    sync_query_params()
+    focus_data = {t: fetch_quote(t) for t in tickers}
+
     # ── Header ────────────────────────────────────────────────────────────────
-    # Build as string concat — triple-quote f-string with strftime % can break markdown parser
     _iv   = st.session_state.refresh_interval
     _rbadge = (
         '<span style="font-family:var(--mono,monospace);font-size:.6rem;'
@@ -3596,7 +3820,8 @@ def main():
         '<span class="pm-session-badge">' + session + '</span>'
         + _rbadge +
         '</div>'
-        '<div class="pm-subtitle">美股盤前即時監控 &middot; Fortune Trading Desk &middot; Groq AI &middot; v4</div>'
+        '<div class="pm-subtitle">美股盤前即時監控 &middot; Fortune Trading Desk &middot; Groq AI &middot; v6 多股票 &middot; 關注：'
+        + _html.escape(" / ".join(tickers)) + '</div>'
         '</div>'
         '<div class="pm-clock">' + _date + '<br><b>' + _time + ' ET</b></div>'
         '</div>'
@@ -3622,11 +3847,12 @@ def main():
         if st.button("✨ 一鍵生成 AI Prompt"):
             with st.spinner("整合最新市場數據中..."):
                 fetch_quote.clear(); fetch_oil_data.clear()
-                oil_data  = fetch_oil_data()
-                tsla_data = fetch_quote("TSLA")
-                vix_data  = fetch_quote("^VIX")
-                qqq_data  = fetch_quote("QQQ")
-            st.session_state.ai_prompt = generate_trading_prompt(events, oil_data, tsla_data, vix_data, qqq_data, is_pre)
+                oil_data   = fetch_oil_data()
+                fresh_data = {t: fetch_quote(t) for t in tickers}
+                vix_data   = fetch_quote("^VIX")
+                qqq_data   = fetch_quote("QQQ")
+            st.session_state.ai_prompt = generate_trading_prompt(
+                events, oil_data, fresh_data, vix_data, qqq_data, is_pre, tickers)
             st.session_state.show_prompt = True
             st.session_state.prompt_copied = False
     with col_btn2:
@@ -3639,17 +3865,13 @@ def main():
             '<div class="prompt-title">📋 複製以下 Prompt，貼入 ChatGPT / Claude / Gemini</div>'
             '</div>',
             unsafe_allow_html=True)
-        # st.code() provides the native copy icon (top-right of code block) — most reliable in Streamlit Cloud
         st.code(st.session_state.ai_prompt, language="markdown")
 
-        # Secondary copy button using st.components.v1.html() — runs in its own iframe
-        # so it has proper clipboard permissions, unlike st.markdown <script> which is stripped
         import streamlit.components.v1 as _stc
-        # Escape chars that would break the JS template literal
         _pe = st.session_state.ai_prompt
-        _pe = _pe.replace("\\", "\\\\")  # backslash first
-        _pe = _pe.replace("`", "\\`")          # backtick
-        _pe = _pe.replace("${", "\\${")        # template literal interpolation
+        _pe = _pe.replace("\\", "\\\\")
+        _pe = _pe.replace("`", "\\`")
+        _pe = _pe.replace("${", "\\${")
         _prompt_escaped = _pe
         _copy_html = f"""
 <style>
@@ -3673,7 +3895,6 @@ def main():
 <script>
 function doCopy() {{
   const text = `{_prompt_escaped}`;
-  // Method 1: modern clipboard API (works when page has focus)
   if (navigator.clipboard && navigator.clipboard.writeText) {{
     navigator.clipboard.writeText(text)
       .then(onSuccess)
@@ -3683,7 +3904,6 @@ function doCopy() {{
   }}
 }}
 function fallback(text) {{
-  // Method 2: execCommand — works inside iframes without clipboard permission
   const ta = document.createElement('textarea');
   ta.value = text;
   ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
@@ -3710,81 +3930,98 @@ function onSuccess() {{
         _stc.html(_copy_html, height=48)
 
     # ── Stock sections ────────────────────────────────────────────────────────
-    all_sections = {"核心持倉": WATCHLISTS["核心持倉"], "指數ETF": WATCHLISTS["指數ETF"]}
+    all_sections = {"🎯 重點關注": [(t, "") for t in tickers]}
+    _core = [x for x in WATCHLISTS["核心持倉"] if x[0] not in tickers]
+    if _core:        all_sections["參考持倉"] = _core
+    all_sections["指數ETF"] = WATCHLISTS["指數ETF"]
     if show_vix:     all_sections["波動/恐慌"] = WATCHLISTS["波動/恐慌"]
     if show_lev:     all_sections["槓桿ETF"]   = WATCHLISTS["槓桿ETF"]
     if show_futures: all_sections["期貨代理"]   = WATCHLISTS["期貨代理"]
     if st.session_state.custom_tickers.strip():
-        custom_list = [(l.strip().upper(),"") for l in st.session_state.custom_tickers.strip().split("\n") if l.strip()]
+        custom_list = [(l.strip().upper(), "") for l in st.session_state.custom_tickers.strip().split("\n") if l.strip()]
         if custom_list: all_sections["自訂監控"] = custom_list
-    for sec, tickers in all_sections.items():
+    for sec, sec_tickers in all_sections.items():
         st.markdown(f'<div class="section-label">▸ {sec}</div>', unsafe_allow_html=True)
         cols = st.columns(2)
-        for i, (ticker, _) in enumerate(tickers):
+        for i, (ticker, _) in enumerate(sec_tickers):
             with cols[i % 2]:
                 render_quote_card(fetch_quote(ticker), is_pre, is_post)
 
     if show_oil:
         render_oil_panel()
 
-    # ── Yields ───────────────────────────────────────────────────────────────
     if show_yield:
         render_yield_panel()
 
-    # ── Sector rotation ───────────────────────────────────────────────────────
     if show_sector:
         render_sector_panel()
 
-    # ── Macro Lead Indicators (DXY + BTC + Gold) ────────────────────────────
     if show_macro:
         render_macro_lead_panel()
 
-    # ── Fear & Greed ──────────────────────────────────────────────────────────
     if show_fg:
         st.markdown('<div class="section-label">▸ 😱 市場情緒指標</div>', unsafe_allow_html=True)
         render_fear_greed()
 
-    # ── News panels ───────────────────────────────────────────────────────────
+    # ── 宏觀新聞（影響分析會逐檔列出）────────────────────────────────────────
     sk, gk = st.session_state.serper_key, st.session_state.groq_key
     _today = _today_et_str()
+    _focus_t = tuple(tickers)
+    _focus_q = " ".join(tickers)
     if show_trump:
-        render_intel_panel("Trump 最新表態監控", f"Trump Truth Social statement stock market {_today}", sk, gk, "🇺🇸")
+        render_intel_panel("Trump 最新表態監控", f"Trump Truth Social statement stock market {_today}", sk, gk, "🇺🇸", focus=_focus_t)
     if show_iran:
-        render_intel_panel("伊朗戰爭 · 油價消息", f"Iran war oil price Hormuz ceasefire {_today}", sk, gk, "🛢️")
+        render_intel_panel("伊朗戰爭 · 油價消息", f"Iran war oil price Hormuz ceasefire {_today}", sk, gk, "🛢️", focus=_focus_t)
     if show_fed:
         render_intel_panel(
             "Fed 官員表態監控",
             f"Federal Reserve official speech hawkish dovish rate Warsh Powell {_today}",
-            sk, gk, "🏦")
+            sk, gk, "🏦", focus=_focus_t)
     if show_earnings:
         render_intel_panel(
             "科技財報 · 業績動態",
-            f"tech earnings results NVDA TSLA MSFT AAPL AMZN guidance {_today}",
-            sk, gk, "📊")
+            f"tech earnings results {_focus_q} NVDA MSFT AAPL AMZN guidance {_today}",
+            sk, gk, "📊", focus=_focus_t)
     if show_china:
         render_intel_panel(
             "中美貿易 · 台灣局勢",
-            f"US China trade tariff Taiwan semiconductor TSLA Shanghai {_today}",
-            sk, gk, "🌏")
+            f"US China trade tariff Taiwan semiconductor {_focus_q} {_today}",
+            sk, gk, "🌏", focus=_focus_t)
 
-    # ── TSLA Relative Strength ───────────────────────────────────────────────
+    # ── 個股層（每檔獨立）────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="section-label">▸ 🎯 個股分析 · ' + _html.escape(" / ".join(tickers)) + '</div>',
+        unsafe_allow_html=True)
+    st.caption("⚠️ 宏觀面板（油價/殖利率/DXY 等）的判讀文案以科技成長股為視角；能源、金融、防禦型股票請反向或自行調整解讀。")
+
     if show_rs:
-        render_relative_strength()
+        render_relative_strength(tickers)
 
-    # ── Put/Call Ratio ────────────────────────────────────────────────────────
     if show_pc:
-        render_put_call_panel()
+        render_put_call_panel(tickers)
 
-    # ── TSLA Technical Panel ─────────────────────────────────────────────────
-    tech_result = None
-    if show_tech:
-        tech_result = render_tsla_tech_panel()
+    tech_map = {}
+    if show_tech or show_stock_news:
+        tabs = st.tabs(tickers) if len(tickers) > 1 else [st.container()]
+        for tab, t in zip(tabs, tickers):
+            with tab:
+                _nm = st.session_state.focus_names.get(t) or (focus_data.get(t) or {}).get("name") or t
+                _ed = fetch_next_earnings(t)
+                st.caption(f"{t} · {_nm} · 基準 {get_benchmark(t)} · 持股 {get_shares(t)} 股"
+                           + (f" · 下次財報 {_ed}" if _ed else ""))
+                if show_tech:
+                    res = render_tech_panel(t)
+                    if res:
+                        tech_map[t] = res
+                if show_stock_news:
+                    render_intel_panel(
+                        f"{t} 個股新聞",
+                        f"{t} stock news analyst earnings {_today}",
+                        sk, gk, "📰", focus=(t,))
 
     # ── Quick metrics bar ─────────────────────────────────────────────────────
     st.markdown('<div class="section-label">▸ 快速指標</div>', unsafe_allow_html=True)
-    vd = fetch_quote("^VIX"); sd = fetch_quote("SPY")
-    qd = fetch_quote("QQQ");  td = fetch_quote("TSLA")
-    m1,m2,m3,m4 = st.columns(4)
+    vd = fetch_quote("^VIX"); sd = fetch_quote("SPY"); qd = fetch_quote("QQQ")
 
     def mini(col, lbl, val, sub, col_cls=""):
         col.markdown(f'<div class="mini-card"><div class="mini-label">{lbl}</div>'
@@ -3794,36 +4031,39 @@ function onSuccess() {{
     def best_pct(d):
         if not d or d.get("error"): return None, None, "—"
         et_t = datetime.now(pytz.timezone("America/New_York")).time()
-        _is_reg = time(9,30) <= et_t < time(16,0)
+        _is_reg = time(9, 30) <= et_t < time(16, 0)
         if d.get("pre_pct") is not None and not _is_reg: return d["pre_pct"], d.get("pre_price") or d.get("price"), "盤前"
         if d.get("reg_pct") is not None: return d["reg_pct"], d.get("price"), "盤中" if _is_reg else "收盤"
         if d.get("pre_pct") is not None: return d["pre_pct"], d.get("pre_price") or d.get("price"), "盤前"
         if d.get("post_pct") is not None: return d["post_pct"], d.get("post_price"), "盤後"
         return None, d.get("price"), "—"
 
-    # FIX #8: VIX with yesterday delta
+    m1, m2, m3 = st.columns(3)
     vp = vd.get("price")
     vp_prev = fetch_vix_prev()
-    vc = "down" if (vp and vp>25) else ("up" if (vp and vp<18) else "flat")
-    vl = "極度恐慌" if (vp and vp>30) else ("恐慌" if (vp and vp>20) else "平靜")
+    vc = "down" if (vp and vp > 25) else ("up" if (vp and vp < 18) else "flat")
+    vl = "極度恐慌" if (vp and vp > 30) else ("恐慌" if (vp and vp > 20) else "平靜")
     vix_delta = ""
     if vp and vp_prev:
         d_val = vp - vp_prev
-        vix_delta = f' ({"+" if d_val>=0 else ""}{d_val:.2f} vs昨)'
+        vix_delta = f' ({"+" if d_val >= 0 else ""}{d_val:.2f} vs昨)'
     mini(m1, "VIX 恐慌", fmt_num(vp), f"{vl}{vix_delta}", vc)
-
     sp, _, slbl = best_pct(sd)
     mini(m2, f"SPY {slbl}%", fmt_pct(sp), f"收盤 {fmt_num(sd.get('price'))}", cc(sp))
     qp, _, qlbl = best_pct(qd)
     mini(m3, f"QQQ {qlbl}%", fmt_pct(qp), f"收盤 {fmt_num(qd.get('price'))}", cc(qp))
-    tp, _, tlbl = best_pct(td)
-    mini(m4, f"TSLA {tlbl}%", fmt_pct(tp), f"收盤 {fmt_num(td.get('price'))}", cc(tp))
+
+    st.markdown('<div style="height:.4rem"></div>', unsafe_allow_html=True)
+    fcols = st.columns(len(tickers))
+    for col, t in zip(fcols, tickers):
+        fd = focus_data.get(t) or {}
+        fp, _, flbl = best_pct(fd)
+        mini(col, f"{t} {flbl}%", fmt_pct(fp), f"收盤 {fmt_num(fd.get('price'))}", cc(fp))
 
     # ── Telegram push (runs every refresh cycle) ─────────────────────────────
     if st.session_state.get("tg_token") and st.session_state.get("tg_chat_id"):
         _yield_data  = fetch_yields()  if show_yield  else {}
         _sector_data = fetch_sectors() if show_sector else []
-        # Also check DXY extreme move for Telegram alert
         if show_macro:
             _macro_data = fetch_macro_leads()
             _dxy = _macro_data.get("DX=F", {})
@@ -3850,7 +4090,7 @@ function onSuccess() {{
                 if _should_send(_h2):
                     _tg_send(st.session_state["tg_token"], st.session_state["tg_chat_id"],
                              "₿ <b>Fortune Pre-Market</b>\n\n" + _msg)
-        render_telegram_panel(td, vd, _yield_data, _sector_data, tech_result)
+        render_telegram_panel(focus_data, vd, _yield_data, _sector_data, tech_map)
 
     # ── Footer ────────────────────────────────────────────────────────────────
     next_refresh = f" · ⏱ 自動刷新每 {st.session_state.refresh_interval}s" if st.session_state.auto_refresh else ""
